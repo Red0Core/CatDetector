@@ -96,7 +96,7 @@ def build_model(model_name: str) -> keras.Model:
     return model
 
 
-def test_model(model: keras.Model, test_loader: DataLoader) -> float:
+def test_model(model: keras.Model, test_loader: DataLoader, filename) -> float:
     """
     Тестирует модель на тестовой выборке и выводит метрики
     """
@@ -145,12 +145,12 @@ def test_model(model: keras.Model, test_loader: DataLoader) -> float:
         for j in range(2):
             plt.text(j, i, cm[i, j], horizontalalignment="center", verticalalignment="center", color="black")
 
-    plt.show()
+    plt.savefig(filename)
 
     return accuracy
 
 
-def plot_hist(hist: keras.callbacks.History):
+def plot_hist(hist: keras.callbacks.History, filename):
     """
     Строит графики обучения модели (accuracy и loss)
     """
@@ -160,7 +160,7 @@ def plot_hist(hist: keras.callbacks.History):
     plt.ylabel("accuracy")
     plt.xlabel("epoch")
     plt.legend(["train", "validation"], loc="upper left")
-    plt.show()
+    plt.savefig(filename)
 
 def create_gui(model: keras.Model):
     """
@@ -215,12 +215,26 @@ def get_data_loaders(model_name: str) -> tuple[DataLoader]:
 
     return train_loader, val_loader, test_loader
 
-def train(model: keras.Model, epochs: int, train_loader: DataLoader, val_loader: DataLoader):
+class SaveEpochCallback(keras.callbacks.Callback):
+    """
+    Callback для сохранения модели после каждой эпохи с указанием номера эпохи в имени файла
+    """
+    def __init__(self, model_name):
+        super().__init__()
+        self.model_name = model_name
+        
+    def on_epoch_end(self, epoch, logs=None):
+        # Сохраняем модель после каждой эпохи
+        filename = f"{self.model_name}_epoch_{epoch}.keras"
+        self.model.save(filename)
+        print(f"\nМодель сохранена как {filename}\n\n")
+
+def train(model: keras.Model, epochs: int, train_loader: DataLoader, val_loader: DataLoader, callbacks):
     """
     Обучает модель и возвращает время обучения и историю обучения
     """
     start_time = time.time()
-    hist = model.fit(train_loader, epochs=epochs, validation_data=val_loader)
+    hist = model.fit(train_loader, epochs=epochs, validation_data=val_loader, callbacks=callbacks)
     training_time = time.time() - start_time
     
     return training_time, hist
@@ -247,14 +261,23 @@ if __name__ == '__main__':
             train_loader, val_loader, test_loader = get_data_loaders(model_name)
             print("Загружены данные")
 
+
+            # Добавляем callback для сохранения лучшей модели
+            best_model_callback = keras.callbacks.ModelCheckpoint(
+                filepath="{epoch:03d}_{val_accuracy:03f}_"+f"{model_name}_best_version.keras",
+                monitor='val_accuracy',
+                save_best_only=True,
+                mode='max',
+                verbose=1
+            )
             model = build_model(model_name)
-            training_time, hist = train(model, epochs, train_loader, val_loader)
+            training_time, hist = train(model, epochs, train_loader, val_loader, callbacks=[SaveEpochCallback(model_name), best_model_callback])
             print(f"Время обучения {model_name}: {training_time:.2f} сек")
 
-            plot_hist(hist)
+            plot_hist(hist, f"Accuracy_Loss_{model_name}_{epochs}.png")
         
             # Тестирование модели
-            accuracy = test_model(model, test_loader)
+            accuracy = test_model(model, test_loader, f"Test_Model_Function_{model_name}_{epochs}.png")
             print(f"Точность на тестовой выборке: {accuracy:.4f}")
 
             model_filename = f"{model_name}.keras"
@@ -267,10 +290,72 @@ if __name__ == '__main__':
             sys.exit(1)
 
         model_name = sys.argv[2]
-        model_filename = f"{model_name}.keras"
-        if model_filename in os.listdir("."):
-            print(f'Запускаю GUI с моделью "{model_filename}"')
-            create_gui(keras.models.load_model(model_filename))
-        else:
+        is_started = False
+        for model_filename in os.listdir("."):
+            if 'best' in model_filename and model_name in model_filename:
+                print(f'Запускаю GUI с моделью "{model_filename}"')
+                is_started = True
+                create_gui(keras.models.load_model(model_filename))
+        if not is_started:
             print(f"Отсутствует {model_filename}")
         
+    elif 'test' == sys.argv[1]:
+        def analyze_folder(folder_path, threshold=70):
+            results = []
+            for filename in os.listdir(folder_path):
+                if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    file_path = os.path.join(folder_path, filename)
+                    img = Image.open(file_path).convert("RGB")
+                    img_tensor = transform(img).unsqueeze(0).to(device)
+                    
+                    with torch.no_grad():
+                        output = model.predict(img_tensor).item()
+                    
+                    probability = output * 100
+                    if probability > threshold:
+                        results.append((file_path, probability))
+
+            return results
+
+        def display_results(results):
+            num_images = len(results)
+            cols = 3
+            rows = (num_images + cols - 1) // cols
+
+            fig, axes = plt.subplots(rows, cols, figsize=(15, 5*rows))
+            fig.suptitle(f"Изображения с вероятностью > 70%", fontsize=16)
+
+            for i, (file_path, probability) in enumerate(results):
+                img = Image.open(file_path)
+                ax = axes[i//cols, i%cols] if rows > 1 else axes[i%cols]
+                ax.imshow(img)
+                ax.set_title(f"{os.path.basename(file_path)}\nВероятность: {probability:.2f}%")
+                ax.axis('off')
+
+            # Скрыть пустые подграфики
+            for i in range(num_images, rows*cols):
+                ax = axes[i//cols, i%cols] if rows > 1 else axes[i%cols]
+                ax.axis('off')
+
+            plt.tight_layout()
+            plt.show()
+
+        if len(sys.argv) < 3:
+            print("Укажите модель для GUI")
+            sys.exit(1)
+
+        model_name = sys.argv[2]
+        # train_loader, val_loader, test_loader = get_data_loaders(model_name)
+        # print("Загружены данные")
+        for model_filename in os.listdir("."):
+            if 'best' in model_filename and model_name in model_filename:
+                print(f'Запускаю GUI с моделью "{model_filename}"')
+                break
+        model = keras.models.load_model(model_filename)
+        # accuracy = test_model(model, test_loader, f"Test_Model_Function_{model_name}.png")
+        # print(f"Точность на тестовой выборке: {accuracy:.4f}")
+
+        # Использование функций
+        folder_path = os.path.join("hand_validataion/nekogirls")
+        results = analyze_folder(folder_path)
+        display_results(results)
